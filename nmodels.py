@@ -27,7 +27,7 @@ import copy
 # Ubuntu Example
 # ex. PATH=/usr/local/cuda/bin
 # ex. LD_LIBRARY_PATH=/usr/local/cuda/lib64
-cuda_support = True # Enable CUDA operations by loading CUDA drivers and initializing GPU
+cuda_support = False # Enable CUDA operations by loading CUDA drivers and initializing GPU
 
 if cuda_support:
     from pycuda import autoinit
@@ -100,9 +100,13 @@ def read_seqfile(seqfile):
 
 
 conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T', 'PHE': 'F',
-        'ASN': 'N',
-        'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W', 'ALA': 'A', 'VAL': 'V', 'GLU': 'E', 'TYR': 'Y',
-        'MET': 'M'}
+        'ASN': 'N', 'GLY': 'G', 'HIS': 'H', 'HSD':'H', 'HSP':'H', 'HSE':'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W',
+        'ALA': 'A', 'VAL': 'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}
+
+
+oxmassdict = {"A": 0.2301, "R": 0.5055, "N": 0.3693, "D": 0.3725, "C": 0.3338, "E":0.4179, "Q": 0.4147, "G": 0.1847, "H": 0.4439,
+            "I": 0.3663, "L": 0.3663, "K": 0.149, "M": 0.4271, "F": 0.4764, "P": 0.3143, "S": .2818, "T": 0.3272, "W": 0.6027,
+            "Y": 0.5282, "V": 0.3209}
 
 
 # Gets all chains in PDB File
@@ -122,7 +126,8 @@ def get_pdb_info(pdb_file, returntype='cb'):
     # orientation vector container
     tmp_N_vectors = []
 
-    chainids, chain_coords, chain_seqs, chain_bfactors, chainbounds = [], [], [], [], {}
+    chainids, chain_coords, chain_seqs, chain_bfactors, chainbounds, masses = [], [], [], [], {}, []
+    # Masses are in oxDNA Simulation Units
 
     # iterate through chains in pdb
     for chain in model:
@@ -140,6 +145,7 @@ def get_pdb_info(pdb_file, returntype='cb'):
             if tags[3][0] == " ":
                 # Get Residues one letter code
                 onelettercode = conv[residue.get_resname()]
+                masses.append(oxmassdict[onelettercode])
                 # get residue number and identity per chain
                 chainseqtmp.append((tags[2], onelettercode))
                 chainboundstmp.append(int(tags[3][1]))
@@ -229,7 +235,7 @@ def get_pdb_info(pdb_file, returntype='cb'):
         fseq += i
 
     returndict = {"b": fbfact, "B": chain_bfactors, "c": fcoords, "C": chain_coords, "s": chain_seqs, "S": fseq,
-                  "m": chainmap, "1": a1s, "3": a3s, "p": chainbounds}
+                  "m": chainmap, "1": a1s, "3": a3s, "p": chainbounds, "M": masses}
 
     returnstrlist = list(returntype)
     returnparser = [returndict[i] for i in returnstrlist]
@@ -332,6 +338,25 @@ def spherical_dtheta(theta, phi):
 def spherical_dphi(theta, phi):
     return np.asarray([-1. * math.sin(theta) * math.sin(phi), math.cos(phi) * math.sin(theta), 0.])
 
+# reads in force constant file generated with hanm c routine
+def read_fc_file(file, N):
+    o = open(file, 'r')
+    sc_matrix = np.full((N, N), 0.)
+    for line in o:
+        l = line.split()
+        #print(l)
+        sc_matrix[int(l[0])-1][int(l[1])-1] = float(l[2])
+    # loaded the spring_constant_matrix
+    # fc constants are in units kJ/(mol nm**2)
+    # Conversion Factor from kJ/(mol nm**2) to pN/nm is ~0.00166055   (1/(Avogadro*10^-24))
+    sc_matrix *= 1.66055  # now in pN/nm
+
+    # 1 su = 57.09 pN/nm
+    sc_matrix /= 57.09
+    return sc_matrix
+
+
+
 @jit(nopython=True)
 def calc_hess_fast_unitary_jit(cc, distance_matrix, masses, gamma=1.):
     threeN = 3 * cc
@@ -359,18 +384,18 @@ def calc_hess_fast_unitary_jit(cc, distance_matrix, masses, gamma=1.):
 
                 # full = np.asarray([[diag[0], xy, xz], [xy, diag[1], yz], [xz, yz, diag[2]]], order='F')
 
-                #get masses
-                mi = masses[i]
-                mj = masses[j]
-                mij = math.sqrt(mi*mj)
-
                 # Hii and Hjj
-                hess[3 * i:3 * i + 3, 3 * i:3 * i + 3] += full/mi
-                hess[3 * j: 3 * j + 3, 3 * j:3 * j + 3] += full/mj
+                hess[3 * i:3 * i + 3, 3 * i:3 * i + 3] += full
+                hess[3 * j: 3 * j + 3, 3 * j:3 * j + 3] += full
 
                 # Hij and Hji
-                hess[3 * i: 3 * i + 3, 3 * j: 3 * j + 3] -= full/mij
-                hess[3 * j: 3 * j + 3, 3 * i: 3 * i + 3] -= full/mij
+                hess[3 * i: 3 * i + 3, 3 * j: 3 * j + 3] -= full
+                hess[3 * j: 3 * j + 3, 3 * i: 3 * i + 3] -= full
+
+    # mass weighted hessian
+    for i in range(threeN):
+        for j in range(threeN):
+            hess[i, j] /= math.sqrt(masses[math.floor(i / 3)])*math.sqrt(masses[math.floor(j / 3)])
     return hess
 
 @jit(nopython=True)
@@ -399,19 +424,19 @@ def calc_hess_fast_sc_jit(cc, distance_matrix, masses, spring_constant_matrix, g
                 full[2] = [xz, yz, diag[2]]
 
                 # full = np.asarray([[diag[0], xy, xz], [xy, diag[1], yz], [xz, yz, diag[2]]], order='F')
-
-                #get masses
-                mi = masses[i]
-                mj = masses[j]
-                mij = math.sqrt(mi*mj)
-
                 # Hii and Hjj
-                hess[3 * i:3 * i + 3, 3 * i:3 * i + 3] += full/mi
-                hess[3 * j: 3 * j + 3, 3 * j:3 * j + 3] += full/mj
+                hess[3 * i:3 * i + 3, 3 * i:3 * i + 3] += full
+                hess[3 * j: 3 * j + 3, 3 * j:3 * j + 3] += full
 
                 # Hij and Hji
-                hess[3 * i: 3 * i + 3, 3 * j: 3 * j + 3] -= full/mij
-                hess[3 * j: 3 * j + 3, 3 * i: 3 * i + 3] -= full/mij
+                hess[3 * i: 3 * i + 3, 3 * j: 3 * j + 3] -= full
+                hess[3 * j: 3 * j + 3, 3 * i: 3 * i + 3] -= full
+
+    # mass weighted hessian
+    for i in range(threeN):
+        for j in range(threeN):
+            hess[i, j] /= math.sqrt(masses[math.floor(i / 3)]) * math.sqrt(masses[math.floor(j / 3)])
+
     return hess
 
 
@@ -446,7 +471,7 @@ class ANM(object):
         self.cutoff = cutoff
         # Angstroms in 1 sim unit length
         self.sim_force_const = .05709  # (Sim Units to pN/A)
-        # IN picoNetwtons/ Angstroms
+        # IN picoNetwtons Angstroms
         self.kb = 0.00138064852
         # Kelvin
         self.T = T
@@ -480,13 +505,14 @@ class ANM(object):
         self.distance_matrix = d_matrix
 
     def calc_hess_fast_sc(self, spring_constant_matrix):
-        hess = calc_hess_fast_sc_jit(self.cc, self.distance_matrix, self.masses, spring_constant_matrix)
+        hess = calc_hess_fast_sc_jit(self.cc, self.distance_matrix, np.asarray(self.masses), spring_constant_matrix)
         return hess
 
     def calc_hess_fast_unitary(self, gamma=1.):
-        hess = calc_hess_fast_unitary_jit(self.cc, self.distance_matrix, self.masses, gamma=gamma)
+        hess = calc_hess_fast_unitary_jit(self.cc, self.distance_matrix, np.asarray(self.masses), gamma=gamma)
         return hess
 
+    # doesn't support variable masses
     def calc_inv_Hess(self, hess, cuda=False):
         if cuda:
             try:
@@ -507,6 +533,58 @@ class ANM(object):
         invw[singular] = 0.
         hessinv = np.dot(np.dot(U, np.diag(invw)), Vt)
         return hessinv
+
+    # does support variable masses
+    def calc_eig_msd(self, hess, cuda=False):
+        if cuda:
+            thess = np.asarray(hess, dtype=np.float32, order='C')
+            cu_hess = gpuarray.to_gpu(thess)
+            cu_evecs, cu_evals = cuda_la.eig(cu_hess, imag='T')
+            evals, evecs = cu_evals.get(), cu_evecs.get()
+        else:
+            evals, evecs = la.eig(hess)
+        # print(self.evals)
+        idx = np.argsort(abs(evals))
+        evals = np.asarray(evals[idx])
+
+        if cuda:
+            evecs = np.asarray(evecs[idx, :])
+            evecs = np.swapaxes(evecs, 1, 0)
+        else:
+            evecs = np.asarray(evecs[:, idx])
+            # evecs = np.asarray(evecs[idx])
+            # evecs = np.asarray(evecs[:, idx])
+            # evecs = np.swapaxes(evecs, 0, 1)
+
+        #Debugging
+        # fig = plt.figure()
+        # plt.imshow(evecs)
+        # plt.savefig('evecs.png', dpi=600)
+
+        # print('eVALS:', evals[6], evals[7])
+        # print('evecs:', evecs[0, 6], evecs[0, 7], evecs[1, 6], evecs[1, 7])
+        # Needed for variable masses
+        for i in range(3 * self.cc):
+            evecs[i, :] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+            # evecs[:, i] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+            # evals[i] /= self.masses[math.floor(i / 3)]  # weight back eigen vectors
+            # pass
+            # evecs[i, :] *= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+            # evecs[i, :] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+
+        # evecs = np.swapaxes(evecs, 0, 1)
+
+        msd = [0. for x in range(self.cc)]
+
+        # Replace translation/rotation degrees of freedom with 0, they are very < -10
+        evals[0:6] = [0., 0., 0., 0., 0., 0.]
+
+        for i in range(self.cc):
+            for j in range(6, 3 * self.cc):
+                msd[i] += np.inner(evecs[3 * i: 3 * i + 3, j], evecs[3 * i: 3 * i + 3, j]) / (evals[j])
+            msd[i] *= self.kb * self.T
+
+        return msd
 
     def save_inverse_Hessian(self, invhess, outfile):
         np.save(outfile, invhess)
@@ -543,7 +621,7 @@ class ANM(object):
     # The two keys below assign predicted B-factors to 2 groups outliers and non outliers
     # max_deviations filters out outliers farther than x deviations away from the mean of the predicted B-factors(takes float and int)
     # bmax is manual cutoff that considers any B-factor over that value as an outlier
-    def ANM_fit_to_exp_linear(self, max_deviations=2, bmax=10000):
+    def ANM_fit_to_exp_linear(self, max_deviations=2, bmax=10000, exp_max=-1, exp_min=-1):
         if self.msds:  # The mean square deviations must be precomputed
             try:
                 from sklearn.linear_model import LinearRegression
@@ -552,7 +630,21 @@ class ANM(object):
                 sys.exit()
             # Check for outlier data (Unconstrained Residues)
             flex_data = np.asarray([x * self.bconv for x in self.msds])  # Bfactors of all
-
+            
+            
+            # Prep Exp Data, can remove these type of outliers from fitting
+            exp_data = np.asarray(self.exp_bfactors)
+            if exp_min > 0:
+                keep = exp_data > exp_min
+                exp_data = exp_data[keep]
+                flex_data = flex_data[keep]
+                print(f"INFO: Removed Experimental BFactors < {exp_min} for fitting")
+            if exp_max > 0:
+                keep = exp_data < exp_max
+                exp_data = exp_data[keep]
+                flex_data = flex_data[keep]
+                print(f"INFO: Removed Experimental BFactors > {exp_max} for fitting")
+            
             mean = np.mean(flex_data)
             standard_deviation = np.std(flex_data)
             distance_from_mean = abs(flex_data - mean)
@@ -562,8 +654,7 @@ class ANM(object):
             self.no_outliers = [i for i, x in enumerate(not_outlier) if x]
             no_outliers = flex_data[not_outlier]
             self.outliers = outlier_indxs
-            # Prep Exp Data
-            exp_data = np.asarray(self.exp_bfactors)
+            
             adj_bfactors = exp_data[not_outlier]  # Remove exp data for outliers for fitting
             print("INFO:", "Residues who's B factors were ignored during fitting, pre-cutoff:", self.outliers)
 
@@ -647,30 +738,52 @@ class ANM(object):
     def calc_ANM_sc(self, spring_constant_matrix, cuda=False):
         self.calc_dist_matrix()
         hess = self.calc_hess_fast_sc(spring_constant_matrix)
-        iH = self.calc_inv_Hess(hess, cuda=cuda)
-        self.calc_msds(iH)
+        # iH = self.calc_inv_Hess(hess, cuda=cuda)
+        # self.calc_msds(iH)
+        self.msds = self.calc_eig_msd(hess, cuda=cuda)  # Support different masses
         self.ana_bfactors = [self.bconv * x for x in self.msds]
 
-    def calc_ANM_unitary(self, cuda=False, outliers=True, max_devs=2, bmax=10000):
+    # Value key word solves the ANM and returns the msds at a specified value, value type is whether provided value is in pN/A "ana" or sim units (par file of simulation) "sim"
+    def calc_ANM_unitary(self, cuda=False, outliers=True, max_devs=2, bmax=10000, exp_min=-1, exp_max=-1, value=None, value_type="sim"):
         self.calc_dist_matrix()
         hess = self.calc_hess_fast_unitary()
-        iH = self.calc_inv_Hess(hess, cuda=cuda)
+        # iH = self.calc_inv_Hess(hess, cuda=cuda)
+        # self.calc_msds(iH)
 
-        self.calc_msds(iH)
+        self.msds = self.calc_eig_msd(hess, cuda=cuda) #  Support different masses
         # print(self.msds)
         # self.ANM_fit_to_exp()
-        if outliers:
-            self.ANM_fit_to_exp_linear(max_deviations=max_devs, bmax=bmax)
+        if value is None:
+            if outliers:
+                self.ANM_fit_to_exp_linear(max_deviations=max_devs, bmax=bmax, exp_min=exp_min, exp_max=exp_max)
+            else:
+                self.ANM_simple_lin_fit()
         else:
-            self.ANM_simple_lin_fit()
+            if value_type == "sim":
+                self.ana_gamma = value * 0.05709
+                self.ana_msd = [x * 1 / self.ana_gamma for x in self.msds]
+                self.ana_bfactors = [self.bconv * x * 1 / self.ana_gamma for x in self.msds]
+            elif value_type == "ana":
+                self.ana_gamma = value
+                self.ana_msd = [x * 1 / self.ana_gamma for x in self.msds]
+                self.ana_bfactors = [self.bconv * x * 1 / self.ana_gamma for x in self.msds]
+            else:
+                print(f"Value Type {value_type} is not supported")
+                exit(1)
 
-    def anm_compare_bfactors(self, outfile, bmap='', view_outliers=True):
+    def anm_compare_bfactors(self, outfile, bmap='', view_outliers=True, rmin=-1, rmax=-1):
         if self.ana_bfactors:
             exp_data = self.exp_bfactors
             ana_data = self.ana_bfactors
             if (not view_outliers):
                 exp_data = [self.exp_bfactors[x] for x in self.no_outliers]
                 ana_data = [self.ana_bfactors[x] for x in self.no_outliers]
+            if rmax > -1:
+                exp_data = exp_data[:rmax+1]
+                ana_data = ana_data[:rmax+1]
+            if rmin > -1:
+                exp_data = exp_data[rmin:]
+                ana_data = ana_data[rmin:]
             if bmap:
                 free_compare(outfile, exp_data, ana_data, bmap=bmap,
                              legends=['Experimental  (PDB)',
@@ -684,13 +797,19 @@ class ANM(object):
         else:
             print('Analytical B Factors have not been Calculated')
 
-    def anm_compare_bfactors_jupyter(self, bmap='', view_outliers=True):
+    def anm_compare_bfactors_jupyter(self, bmap='', view_outliers=True, rmin=-1, rmax=-1):
         if self.ana_bfactors:
             exp_data = self.exp_bfactors
             ana_data = self.ana_bfactors
             if (not view_outliers):
                 exp_data = [self.exp_bfactors[x] for x in self.no_outliers]
                 ana_data = [self.ana_bfactors[x] for x in self.no_outliers]
+            if rmax > -1:
+                exp_data = exp_data[:rmax+1]
+                ana_data = ana_data[:rmax+1]
+            if rmin > -1:
+                exp_data = exp_data[rmin:]
+                ana_data = ana_data[rmin:]
             if bmap:
                 free_compare_jupyter(exp_data, ana_data, bmap=bmap,
                                      legends=['Experimental  (PDB)',
@@ -1142,11 +1261,21 @@ class ANMT(ANM):
 # Known Issues: Will not converge if under-constrained residues present, will have to raise cutoff value
 class HANM(ANM):
     def __init__(self, coord, exp_bfactors, cutoff=15, T=300, scale_factor=0.3, mcycles=5, ncycles=7, masses=[], initval=1):
+        # coord = np.asarray(coord) / 10.  # change to nm from A
         super().__init__(coord, exp_bfactors, T=T, cutoff=cutoff, masses=masses)
         self.spring_constant_matrix = np.full((self.cc, self.cc), initval)
-        self.calc_ANM_unitary(cuda=False, outliers=True, max_devs=1.5, bmax=10000)
-        print(self.ana_gamma)
+        # self.calc_ANM_unitary(cuda=False, outliers=True, max_devs=3.0, bmax=100000)
+        self.calc_dist_matrix()
+        hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+        # bcal, bond_fluc = self.hanm_calc_bond_fluctuations(hess, cuda=True)
+        self.msds = self.calc_eig_msd(hess, cuda=True)
+        self.ANM_fit_to_exp_linear(max_deviations=2, bmax=15000)
+        # print(self.ana_gamma)
+        #self.anm_compare_bfactors('test.png')
         self.spring_constant_matrix = np.full((self.cc, self.cc), self.ana_gamma)
+        #
+        # hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+        # bcal, bond_fluc = self.hanm_calc_bond_fluctuations(hess, cuda=cuda)
 
         self.restraint_force_constants = []
         self.bond_fluctuations = []
@@ -1158,18 +1287,18 @@ class HANM(ANM):
         self.routine_finished = False
         self.model_id = 'HANM'
 
-    def preview(self, initval):
-        self.spring_constant_matrix = np.full((self.cc, self.cc), initval)
-        self.calc_dist_matrix()
-        hess = self.calc_hess_fast_unitary()
-        iH = self.calc_inv_Hess(hess, cuda=cuda)
-        self.calc_msds(iH)
-        self.ana_bfactors = [self.bconv * x for x in self.msds]
-
-        self.routine_finished = True
-        self.anm_compare_bfactors_jupyter(view_outliers=True)
-        self.routine_finished = False
-        self.ana_bfactors = []
+    # def preview(self, initval):
+        # self.spring_constant_matrix = np.full((self.cc, self.cc), initval)
+        # self.calc_dist_matrix()
+        # hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+        # self.msds = self.calc_eig_msd(hess, cuda=True)
+        # self.ana_bfactors = [self.bconv * x for x in self.msds]
+        # self.ana_gamma = initval
+        #
+        # self.routine_finished = True
+        # self.anm_compare_bfactors_jupyter(view_outliers=True)
+        # self.routine_finished = False
+        # self.ana_bfactors = []
 
 
     def hanm_calc_restraint_force_constant(self, bcal):
@@ -1214,8 +1343,12 @@ class HANM(ANM):
         # print('eVALS:', evals[6], evals[7])
         # print('evecs:', evecs[0, 6], evecs[0, 7], evecs[1, 6], evecs[1, 7])
         # Needed for variable masses
+        # for i in range(3 * self.cc):
+        #     evecs[i, 6:] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+
         for i in range(3 * self.cc):
-            evecs[i, 6:] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+            evecs[i, :] /= math.sqrt(self.masses[math.floor(i / 3)])  # weight back eigen vectors
+
 
         bcal = [0. for x in range(self.cc)]
         bond_fluc = np.full((self.cc, self.cc), 0.)
@@ -1263,6 +1396,7 @@ class HANM(ANM):
             for y in range(self.cc):
                 rb1 = abs(bcal[y] - bcalprev[y]) / bcal[y]
                 rb2 = abs(bcal[y] - self.exp_bfactors[y]) / self.exp_bfactors[y]
+                #print("rb2", rb2)
 
                 # criterion can be changed if need be
                 if rb2 > mthreshold2:
@@ -1294,6 +1428,7 @@ class HANM(ANM):
                         if self.distance_matrix[x, 4 * y] != 0.: #check if bonded in dist matrix
                             delta_fluc = bond_fluc[x, y] - bond_fluc0[x, y]
                             r2 = abs(delta_fluc) / bond_fluc0[x, y]
+                            #print(r2, 'r2')
                             if r2 > nthreshold:
                                 ncheck = 0.
 
@@ -1353,7 +1488,7 @@ n = '\n'
 class protein:
     def __init__(self, pdbfile, cutoff=15, pottype='s', potential=5.0, offset_indx=0, strand_offset=0,
                  backbone_weight=0,
-                 importscmatrix=False, scmatrix=0, kb=0, kt=0, angconstrain=False, upstreamdir=''):
+                 importscmatrix=False, scmatrix=0, kb=0, kt=0, angconstrain=False, upstreamdir='', name="generated"):
         self.su = 8.518
         self.boxsize = 0
         self.pi = 0
@@ -1367,9 +1502,9 @@ class protein:
 
         wdir = os.getcwd()
         # Outfiles they go into directory you call script from
-        self.parfile = wdir + os.path.join(upstreamdir + '/generated.par')
-        self.topfile = wdir + os.path.join(upstreamdir + '/generated.top')
-        self.datfile = wdir + os.path.join(upstreamdir + '/generated.dat')
+        self.parfile = wdir + os.path.join(upstreamdir + '/' + name +'.par')
+        self.topfile = wdir + os.path.join(upstreamdir + '/' + name +'.top')
+        self.datfile = wdir + os.path.join(upstreamdir + '/' + name +'.dat')
 
         self.sim_force_const = .05709
         self.pottype = pottype
@@ -1391,9 +1526,9 @@ class protein:
         self.strand_offset = strand_offset
         self.offset_indx = offset_indx
         self.topology = []
-        self.conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T',
-                     'PHE': 'F', 'ASN': 'N', 'GLY': 'G', 'HIS': 'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W', 'ALA': 'A',
-                     'VAL': 'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}
+        self.conv = {'CYS': 'C', 'ASP': 'D', 'SER': 'S', 'GLN': 'Q', 'LYS': 'K', 'ILE': 'I', 'PRO': 'P', 'THR': 'T', 'PHE': 'F',
+        'ASN': 'N', 'GLY': 'G', 'HIS': 'H', 'HSD':'H', 'HSP':'H', 'HSE':'H', 'LEU': 'L', 'ARG': 'R', 'TRP': 'W',
+        'ALA': 'A', 'VAL': 'V', 'GLU': 'E', 'TYR': 'Y', 'MET': 'M'}
 
         self.a1s = []
         self.a3s = []
@@ -1697,27 +1832,79 @@ class protein:
         print('Wrote Topology File to', self.topfile)
 
 
-def export_to_simulation(model, pdbfile, upstreamdir=''):
+def export_to_simulation(model, pdbfile, upstreamdir='', name='generated'):
     if model.model_id == 'ANM':
-        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma / 0.05709, upstreamdir=upstreamdir)
+        p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma / 0.05709, upstreamdir=upstreamdir, name=name)
         p.WriteSimFiles()
     elif model.model_id == 'HANM' or model.model_id == 'MVP' or model.model_id == 'mANM':
         p = protein(pdbfile, cutoff=model.cutoff, importscmatrix=True, scmatrix=model.spring_constant_matrix,
-                    upstreamdir=upstreamdir)
+                    upstreamdir=upstreamdir, name=name)
         p.WriteSimFiles()
     elif model.model_id == 'pep':
         p = protein(pdbfile, cutoff=0, potential=0, angconstrain=True, backbone_weight=model.backbone_weight,
-                    upstreamdir=upstreamdir)
+                    upstreamdir=upstreamdir, name=name)
         p.WriteParFile_custombonds(model.bonds, potential=model.potential)
         p.WriteConfFile()
         p.WriteTopFile()
     elif model.model_id == 'ANMT':
         if model.kbend > 0 and model.ktor > 0:
             p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma / 0.05709, angconstrain=True,
-                        upstreamdir=upstreamdir, kb=model.kbend, kt=model.ktor)
+                        upstreamdir=upstreamdir, kb=model.kbend, kt=model.ktor, name=name)
         else:
             p = protein(pdbfile, cutoff=model.cutoff, potential=model.ana_gamma / 0.05709, angconstrain=True,
-                        upstreamdir=upstreamdir)
+                        upstreamdir=upstreamdir, name=name)
         p.WriteSimFiles()
     else:
         print('Model Type', model.model_id, 'is not supported')
+
+
+if __name__ == "__main__":
+    network_files = ["cg12_nh.json", "cg90_nh.json", "cg150_nh.json"]  # k means on dna positions (ignored handles)
+    rmsf_files = ["cg12_rmsfs.json", "cg90_rmsfs.json", "cg150_rmsfs.json"]
+
+    network_data = []
+    for i in range(3):
+        coords, simmasses = get_json_info(network_files[i])
+        exp_rmsfs, exp_bfacts = load_sim_rmsds_from_file(rmsf_files[i])
+        # print(len(coords), len(simmasses), len(exp_bfacts))
+        network_data.append([coords, simmasses, exp_bfacts])
+
+    net = 0
+    uno = [1 for x in network_data[net][1]]
+    dos = [2 for x in network_data[net][1]]
+    uanm = ANM(network_data[net][0], network_data[net][2], T=295, cutoff=100000, masses=uno)
+
+    danm = ANM(network_data[net][0], network_data[net][2], T=295, cutoff=100000, masses=dos)
+
+    uanm.calc_ANM_unitary(cuda=True)
+    danm.calc_ANM_unitary(cuda=True)
+
+    print(uanm.ana_bfactors[0], danm.ana_bfactors[0])
+    print(uanm.ana_gamma, danm.ana_gamma)
+
+    # spc_uno = np.full()
+
+    hanm_uno = HANM(network_data[net][0], network_data[net][2], cutoff=100000, T=295, scale_factor=0.003, mcycles=3, ncycles=5, masses=uno, initval=1)
+    hanm_dos = HANM(network_data[net][0], network_data[net][2], cutoff=100000, T=295, scale_factor=0.003, mcycles=3, ncycles=5, masses=dos, initval=1)
+
+    print(hanm_uno.spring_constant_matrix[0][0], hanm_dos.spring_constant_matrix[0][0])
+    print(hanm_uno.ana_bfactors[0], hanm_dos.ana_bfactors[0])
+
+    hess_uno = hanm_uno.calc_hess_fast_sc(hanm_uno.spring_constant_matrix)
+    hess_dos = hanm_dos.calc_hess_fast_sc(hanm_dos.spring_constant_matrix)
+
+    hanm_uno.msds = hanm_uno.calc_eig_msd(hess_uno, cuda=True)
+    hanm_dos.msds = hanm_dos.calc_eig_msd(hess_dos, cuda=True)
+
+    hanm_uno.ana_bfactors = [hanm_uno.bconv*x for x in hanm_uno.msds]
+    hanm_dos.ana_bfactors = [hanm_dos.bconv*x for x in hanm_dos.msds]
+
+    print(hanm_uno.ana_bfactors[0], hanm_dos.ana_bfactors[0])
+
+    bcal_uno, bond_fluc_uno = hanm_uno.hanm_calc_bond_fluctuations(hess_uno, cuda=True)
+    bcal_dos, bond_fluc_dos = hanm_dos.hanm_calc_bond_fluctuations(hess_dos, cuda=True)
+
+    print(bcal_uno[0], bcal_dos[0])
+
+    # hess = self.calc_hess_fast_sc(self.spring_constant_matrix)
+    # bcal, bond_fluc = self.hanm_calc_bond_fluctuations(hess, cuda=cuda)
