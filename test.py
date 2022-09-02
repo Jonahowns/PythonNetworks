@@ -3,6 +3,7 @@ import numpy as np
 import math
 import json
 from sklearn.cluster import KMeans
+from copy import copy
 
 
 def kmeans(X, K):
@@ -175,7 +176,8 @@ class HMC:
         return positions
 
 class Coarse_Grainer:
-    def __init__(self, target_coords, particle_number, kstart=False, distance_cutoff=100, ignore=None, votes=1):
+    def __init__(self, target_coords, particle_number, kstart=False, distance_cutoff=100, ignore=None, votes=1, fix_handles=None,
+                 handle_weight=10, max_radius_decimal=0.9):
         self.K = particle_number  # number of cg particles
 
         # ignored particles will ignore any particle index you give it by deleting it from the coordinates
@@ -216,15 +218,47 @@ class Coarse_Grainer:
         self.s = 1.0  # initial value
         cg_start_index = list(np.random.choice(len(self.target_coords), replace=False, size=particle_number))
         if kstart:
-            cg_start_positions = kmeans(self.target_coords, self.K)
+            handle_coords = copy(self.target_coords)
+            if fix_handles is not None:
+                for ind in fix_handles:
+                    for i in range(handle_weight):
+                        handle_coords = np.append(handle_coords, [self.target_coords[ind]], axis=0)
+            cg_start_positions = kmeans(handle_coords, self.K)
         else:
             cg_start_positions = np.asarray([self.target_coords[x] for x in cg_start_index])
+
+        # if shift_toward_com > 0:
+        #     pos_values = cg_start_positions > 0
+        #     cg_start_positions[pos_values] -= shift_toward_com
+        #     cg_start_positions[~pos_values] += shift_toward_com
 
         self.cg_coords = cg_start_positions
         self.hmc = HMC(cg_start_positions)
         self.masses = self.hmc.masses
         self.Z = self.update_assignment_matrix(self.target_coords, self.cg_coords, self.s)  # NxK assignment matrix
         self.s = self.update_s(self.target_coords, self.cg_coords, self.Z)
+        self.assign_radii(max_radius_decimal)
+
+    def assign_radii(self, decimal_of_max_radius):
+        try:
+            from sklearn.metrics import pairwise_distances
+        except ImportError:
+            print("Need sklearn for pairwise distance calculation")
+            exit(1)
+
+
+        dist_mat = pairwise_distances(self.cg_coords, self.cg_coords)
+
+        min_dist = np.min(dist_mat[dist_mat > 0])
+
+        max_radius = min_dist / 2.
+
+        max_radius_adj = decimal_of_max_radius * max_radius
+
+        normed_masses = self.masses/np.max(self.masses)
+
+        self.radii = normed_masses*max_radius_adj
+
 
     def update_assignment_matrix(self, target_coords, cg_coords, s):
         # stores exp{-1/2s^2 || xn - Xk ||^2}
@@ -360,7 +394,7 @@ class Coarse_Grainer:
     def network_export(self, name):
         indices, masses = self.get_indexing()
 
-        tmp = {'simMasses':masses, 'coordinates':self.cg_coords.tolist()}
+        tmp = {'simMasses':masses, 'coordinates':self.cg_coords.tolist(), "radii":self.radii.tolist()}
 
         out = open(name+'.json', "w")
         json.dump(tmp, out)
@@ -393,10 +427,10 @@ if __name__=='__main__':
     # target_coords = n.get_pdb_info('1bu4.pdb', returntype='c')
     # IcosahedronRT_mean stored as coordinates using the network export of oxView
 
-    k = 150  # number of particles
-    target_coords, masses = n.get_json_info('IcoDNA.json')
+    k = 90  # number of particles
+    target_coords, masses = n.get_json_info('./system_jsons/IcoDNA.json')
     target_coords = np.asarray(target_coords)
-    cg = Coarse_Grainer(target_coords, k, kstart=True, distance_cutoff=200, votes=0, ignore=handles)
+    cg = Coarse_Grainer(target_coords, k, kstart=True, distance_cutoff=200, votes=0, ignore=handles, fix_handles=[5656, 4221, 4072, 5214, 6070, 6250], max_radius_decimal=0.8)
     adjusted_coords = cg.target_coords
     new_positions = cg.coarse_grainer(adjusted_coords, steps=1, timestep=0.002, hmc_steps=2)
     # print(new_positions.shape)
