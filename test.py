@@ -380,15 +380,21 @@ class Coarse_Grainer:
     def get_indexing(self):
         indices = []
         masses = []
+        assigned_particles = []
         for k in range(self.K): # for each coarse grained particle
             particle_indices = []
             for n in range(self.N):
                 if self.Z[n][k] == 1.:  # find real particles assigned to coarse grained
                     particle_indices.append(self.index_mapping[n])  # add
+                    assigned_particles.append(n)
                 else:
                     continue  # do nothing
             indices.append(particle_indices)
             masses.append(len(particle_indices))
+        unassigned_particles = np.full(self.N, True)
+        unassigned_particles[assigned_particles] = False
+        if True in unassigned_particles:
+            print(f"Unassigned Particles in Given System!")
         return indices, masses
 
     def network_export(self, name):
@@ -415,14 +421,49 @@ class Coarse_Grainer:
 
 
 if __name__=='__main__':
-    # Coarse Grain the handle version as that is what we have a trajectory of
-    handle1 = np.arange(5657, 5676)
-    handle2 = np.arange(4222, 4241)
-    handle3 = np.arange(4073, 4092)
-    handle4 = np.arange(5215, 5234)
-    handle5 = np.arange(6071, 6084)
-    handle6 = np.arange(6251, 6270)
-    handles = list(np.concatenate([handle1, handle2, handle3, handle4, handle5, handle6]))
+    # Coarse Grain the handle version as that is what we have a trajectory of, this is for original icosahedron Micha sent
+    # handle1 = np.arange(5657, 5676)
+    # handle2 = np.arange(4222, 4241)
+    # handle3 = np.arange(4073, 4092)
+    # handle4 = np.arange(5215, 5234)
+    # handle5 = np.arange(6071, 6084)
+    # handle6 = np.arange(6251, 6270)
+    # handles = list(np.concatenate([handle1, handle2, handle3, handle4, handle5, handle6]))
+
+
+
+    #### This is for the ico_system from Hao (3p_patches_dimer_910)
+    handle_connection_positions_p1 = [4069, 6405, 6032]
+    handle_start_positions_p1 = [4088, 6424, 6051]
+
+    handle_connection_positions_p2 = [6097, 6512, 5257]
+    handle_start_positions_p2 = [6116, 6531, 5276]
+
+    handle_connection_positions_p3 = [6138, 3817, 6465]
+    handle_start_positions_p3 = [6157, 3836, 6484]
+
+    handle_connection_positions_p4 = [6644, 6339, 5733]
+    handle_start_positions_p4 = [6663, 6358, 5752]
+
+    handle_connection_positions_p5 = [6567, 4925, 6204]
+    handle_start_positions_p5 = [6598, 4944, 6223]
+
+    handle_connection_positions_p6 = [6710, 5558, 6272]
+    handle_start_positions_p6 = [6729, 5577, 5559]
+
+    connection_positions = [*handle_connection_positions_p1, *handle_connection_positions_p2, *handle_connection_positions_p3,
+                            *handle_connection_positions_p4, *handle_connection_positions_p5, *handle_connection_positions_p6]
+
+    start_positions = [*handle_start_positions_p1, *handle_start_positions_p2, *handle_start_positions_p3,
+                       *handle_start_positions_p4, *handle_start_positions_p5, *handle_start_positions_p6]
+
+    handles = []
+    for i in range(len(connection_positions)):
+        handle_indices = np.arange(connection_positions[i] + 1, start_positions)
+        handles.append(handle_indices)
+
+
+
 
     # target_coords = n.get_pdb_info('1bu4.pdb', returntype='c')
     # IcosahedronRT_mean stored as coordinates using the network export of oxView
