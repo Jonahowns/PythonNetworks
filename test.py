@@ -85,12 +85,12 @@ def lennard_jones_forces(rij, parameters):
 
 
 class HMC:
-    def __init__(self, positions):
+    def __init__(self, positions, masses):
         # Assumes positions is 2d numpy array shaped as [N, 3] <- output of get_pdb_info
         self.N = positions.shape[0]  # Number of particles
         self.positions = positions
         self.momenta = np.random.normal(0., 1., 3*self.N).reshape(self.N, 3)  # Randomly generate momenta by sampling from normal distribution
-        self.masses = np.asarray([1. for x in np.arange(len(positions))])
+        self.masses = masses
 
         # CG parameters
         self.excluded_volume_cutoff = 1.5
@@ -233,13 +233,14 @@ class Coarse_Grainer:
         #     cg_start_positions[~pos_values] += shift_toward_com
 
         self.cg_coords = cg_start_positions
-        self.hmc = HMC(cg_start_positions)
-        self.masses = self.hmc.masses
+        self.max_radius_decimal = max_radius_decimal
+        self.masses = []
+        # masses updated in the assignment matrix
         self.Z = self.update_assignment_matrix(self.target_coords, self.cg_coords, self.s)  # NxK assignment matrix
         self.s = self.update_s(self.target_coords, self.cg_coords, self.Z)
-        self.assign_radii(max_radius_decimal)
+        self.hmc = HMC(cg_start_positions, self.masses)
 
-    def assign_radii(self, decimal_of_max_radius):
+    def assign_radii(self, decimal_of_max_radius, cg_coords, masses):
         try:
             from sklearn.metrics import pairwise_distances
         except ImportError:
@@ -247,15 +248,16 @@ class Coarse_Grainer:
             exit(1)
 
 
-        dist_mat = pairwise_distances(self.cg_coords, self.cg_coords)
+        dist_mat = pairwise_distances(cg_coords, cg_coords)
 
+        # In Angstroms
         min_dist = np.min(dist_mat[dist_mat > 0])
 
         max_radius = min_dist / 2.
 
         max_radius_adj = decimal_of_max_radius * max_radius
 
-        normed_masses = self.masses/np.max(self.masses)
+        normed_masses = masses/np.max(masses)
 
         self.radii = normed_masses*max_radius_adj
 
@@ -315,6 +317,13 @@ class Coarse_Grainer:
                 tmp[n] = zero.copy()
                 index = np.argmax(voting)
                 tmp[n][index] = 1.
+
+        # update masses based off assignments
+        new_masses = tmp.sum(axis=0)
+        self.masses = new_masses
+
+        # update radii based off positions of cg particles
+        self.assign_radii(self.max_radius_decimal, cg_coords, self.masses)
 
         return tmp
 
@@ -400,6 +409,7 @@ class Coarse_Grainer:
     def network_export(self, name):
         indices, masses = self.get_indexing()
 
+        # coordinates and radii in Angstroms
         tmp = {'simMasses':masses, 'coordinates':self.cg_coords.tolist(), "radii":self.radii.tolist()}
 
         out = open(name+'.json', "w")
